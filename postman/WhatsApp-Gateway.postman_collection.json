@@ -1,0 +1,662 @@
+{
+  "info": {
+    "name": "WhatsApp Gateway API",
+    "description": "Multi-tenant WhatsApp Gateway for 3PL/OMS systems.\n\n## Quick Start\n1. Import this collection + `WhatsApp-Gateway.postman_environment.json`.\n2. Set `baseUrl` and `tenantId` in the environment.\n3. Run **Auth → 1. Connect** to get a QR code, then scan it in WhatsApp.\n4. Poll **Auth → 3. Check Session Status** until `connected`.\n5. Use **Messages** folder to send bulk messages with per-recipient variable support.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "wa-gateway-collection-v1"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3050/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "tenantId",
+      "value": "tenant-001",
+      "type": "string"
+    },
+    {
+      "key": "lastQrCode",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "sessionConnected",
+      "value": "false",
+      "type": "string"
+    },
+    {
+      "key": "lastJobIds",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "WhatsApp session management — connect, QR refresh, and status polling.",
+      "item": [
+        {
+          "name": "1. Connect (Get QR Code)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('tenantId')) {",
+                  "  pm.collectionVariables.set('tenantId', 'tenant-001');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status is valid', () => {",
+                  "  pm.expect(res.status).to.be.oneOf(['qr_pending', 'connected']);",
+                  "});",
+                  "",
+                  "if (res.qrCode) {",
+                  "  pm.collectionVariables.set('lastQrCode', res.qrCode);",
+                  "  console.log('QR code received — expires at:', res.expiresAt);",
+                  "  console.log('You have', res.expiresInSeconds, 'seconds to scan.');",
+                  "}",
+                  "",
+                  "if (res.expiresAt) {",
+                  "  pm.test('expiresAt is a valid ISO date', () => {",
+                  "    pm.expect(new Date(res.expiresAt).toString()).to.not.eql('Invalid Date');",
+                  "  });",
+                  "  pm.test('expiresInSeconds equals 20', () => {",
+                  "    pm.expect(res.expiresInSeconds).to.eql(20);",
+                  "  });",
+                  "}",
+                  "",
+                  "if (res.status === 'connected') {",
+                  "  pm.collectionVariables.set('sessionConnected', 'true');",
+                  "  console.log('Session already active — no QR scan required.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/connect",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "connect"]
+            },
+            "description": "Starts a WhatsApp socket for the tenant and returns the first QR code.\n\n**Response includes:**\n- `qrCode` — base64 PNG data URL, render as `<img>` and scan with WhatsApp\n- `expiresInSeconds: 20` — time before the QR becomes invalid\n- `expiresAt` — exact ISO timestamp of expiry\n- `message` — human-readable instruction\n\n**Flow after this call:**\n1. Scan the QR within 20 seconds\n2. If not scanned in time → call `POST /auth/qr` for a fresh QR\n3. Poll `POST /auth/status` until `status: connected`"
+          },
+          "response": [
+            {
+              "name": "QR code returned",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"qr_pending\",\n  \"qrCode\": \"data:image/png;base64,iVBORw0KGgo...\",\n  \"expiresAt\": \"2026-07-16T08:30:20.000Z\",\n  \"expiresInSeconds\": 20,\n  \"message\": \"Scan the QR code within 20 seconds. Call POST /auth/qr for a fresh code if it expires.\"\n}"
+            },
+            {
+              "name": "Session already connected",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"connected\",\n  \"qrCode\": null,\n  \"message\": \"Session already active\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Refresh QR (Poll Every 15s)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "if (res.status === 'connected') {",
+                  "  pm.collectionVariables.set('sessionConnected', 'true');",
+                  "  console.log('Connected! You can now send messages.');",
+                  "} else if (res.qrCode) {",
+                  "  pm.collectionVariables.set('lastQrCode', res.qrCode);",
+                  "  console.log('Fresh QR received — expires at:', res.expiresAt);",
+                  "  console.log('Scan it within', res.expiresInSeconds, 'seconds.');",
+                  "} else {",
+                  "  console.log('Status:', res.status, '— retry in a moment.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/qr",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "qr"]
+            },
+            "description": "Returns the latest QR code stored in memory without restarting the socket.\n\nBaileys automatically generates a new QR every ~20 seconds when the previous one expires. This endpoint serves whatever the latest one is.\n\n**When to call this:**\n- The previous QR expired before you could scan it\n- You need to show a refreshed QR on a frontend\n\n**Polling strategy:**\n- Call every **15–18 seconds** (before the 20s expiry window)\n- Stop polling when `status: connected` is returned\n- If `qrCode: null` and `status: connecting` — socket not ready yet, retry in 2–3 seconds"
+          },
+          "response": [
+            {
+              "name": "Fresh QR code",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"qr_pending\",\n  \"qrCode\": \"data:image/png;base64,iVBORw0KGgo...(refreshed)...\",\n  \"expiresAt\": \"2026-07-16T08:30:40.000Z\",\n  \"expiresInSeconds\": 20,\n  \"message\": \"Scan the QR code within 20 seconds. Call POST /auth/qr for a fresh code if it expires.\"\n}"
+            },
+            {
+              "name": "Session connected",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"connected\",\n  \"qrCode\": null,\n  \"message\": \"Session already active\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "4. Disconnect (Keep Credentials)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('status is disconnected', () => pm.expect(res.status).to.eql('disconnected'));",
+                  "pm.test('credentialsCleared is false', () => pm.expect(res.credentialsCleared).to.be.false);",
+                  "pm.collectionVariables.set('sessionConnected', 'false');",
+                  "console.log('Disconnected. Call /auth/connect to reconnect without QR.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"logout\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/disconnect",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "disconnect"]
+            },
+            "description": "Closes the socket but **keeps credentials saved in the database**.\n\nNext call to `POST /auth/connect` will restore the session automatically — no QR scan needed.\n\nUse this for: scheduled downtime, server restarts, temporary pauses."
+          },
+          "response": [
+            {
+              "name": "Disconnected (credentials kept)",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"disconnected\",\n  \"credentialsCleared\": false,\n  \"message\": \"Disconnected. Credentials preserved — call /auth/connect to reconnect without QR.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "5. Logout (Clear Credentials)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('status is disconnected', () => pm.expect(res.status).to.eql('disconnected'));",
+                  "pm.test('credentialsCleared is true', () => pm.expect(res.credentialsCleared).to.be.true);",
+                  "pm.collectionVariables.set('sessionConnected', 'false');",
+                  "console.log('Logged out. A fresh QR scan is required to reconnect.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"logout\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/disconnect",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "disconnect"]
+            },
+            "description": "Fully logs out from WhatsApp **and deletes saved credentials** from the database.\n\nThe session is also removed from WhatsApp on the phone (linked devices list).\n\nNext call to `POST /auth/connect` will require a **fresh QR scan**.\n\nUse this for: switching accounts, security incidents, permanent removal of a tenant."
+          },
+          "response": [
+            {
+              "name": "Logged out (credentials deleted)",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"disconnected\",\n  \"credentialsCleared\": true,\n  \"message\": \"Logged out from WhatsApp. Credentials deleted — a new QR scan will be required.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "3. Check Session Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('tenantId present', () => pm.expect(res.tenantId).to.be.a('string'));",
+                  "pm.test('status is a valid enum value', () => {",
+                  "  pm.expect(res.status).to.be.oneOf([",
+                  "    'connecting', 'qr_pending', 'connected', 'disconnected', 'not_initialized'",
+                  "  ]);",
+                  "});",
+                  "",
+                  "if (res.status === 'connected') {",
+                  "  pm.collectionVariables.set('sessionConnected', 'true');",
+                  "  console.log('Connected — ready to send messages.');",
+                  "} else {",
+                  "  pm.collectionVariables.set('sessionConnected', 'false');",
+                  "  console.log('Current status:', res.status);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "status"]
+            },
+            "description": "Returns the current socket connection status for the tenant.\n\n| Status | Meaning |\n|---|---|\n| `connecting` | Socket is initializing |\n| `qr_pending` | Waiting for QR scan |\n| `connected` | Active — ready to send messages |\n| `disconnected` | Socket closed; auto-reconnect pending (5s back-off) |\n| `not_initialized` | No connection attempt made yet |"
+          },
+          "response": [
+            {
+              "name": "Connected",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"connected\"\n}"
+            },
+            {
+              "name": "QR Pending",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"qr_pending\"\n}"
+            },
+            {
+              "name": "Not Initialized",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"tenantId\": \"tenant-001\",\n  \"status\": \"not_initialized\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Messages",
+      "description": "Bulk message dispatch via BullMQ.\n\n**Per-recipient variables:** Use `{{name}}`, `{{orderId}}` etc. in the message template — each recipient gets their own personalized text.\n\nAll sends are asynchronous — `202 Accepted` is returned as soon as jobs are queued.",
+      "item": [
+        {
+          "name": "Send Bulk (Same Message for All)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('sessionConnected') !== 'true') {",
+                  "  console.warn('Session may not be connected. Run Auth → Connect first.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.test('success is true', () => pm.expect(res.success).to.be.true);",
+                  "pm.test('queued count is a number', () => pm.expect(res.queued).to.be.a('number'));",
+                  "pm.test('jobIds array length matches queued count', () => {",
+                  "  pm.expect(res.jobIds).to.be.an('array').with.length(res.queued);",
+                  "});",
+                  "",
+                  "if (res.jobIds && res.jobIds.length > 0) {",
+                  "  pm.collectionVariables.set('lastJobIds', JSON.stringify(res.jobIds));",
+                  "  console.log('Job IDs:', res.jobIds.join(', '));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"message\": \"Your order has been dispatched. Contact us for tracking.\",\n  \"recipients\": [\n    { \"phone\": \"923001234567\" },\n    { \"phone\": \"923009876543\" },\n    { \"phone\": \"923331234567\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            },
+            "description": "Sends the same message text to all recipients. No variable substitution.\n\nThe worker applies a random 2–6s anti-spam delay between each message and processes jobs serially (concurrency = 1)."
+          },
+          "response": [
+            {
+              "name": "Messages queued",
+              "status": "Accepted",
+              "code": 202,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"queued\": 3,\n  \"jobIds\": [\n    \"msg-clx1a2b3c\",\n    \"msg-clx1a2b3d\",\n    \"msg-clx1a2b3e\"\n  ],\n  \"message\": \"3 message(s) queued for delivery\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Send Bulk (Per-Recipient Variables) ⭐",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('sessionConnected') !== 'true') {",
+                  "  console.warn('Session may not be connected. Run Auth → Connect first.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "",
+                  "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.test('success is true', () => pm.expect(res.success).to.be.true);",
+                  "pm.test('3 jobs queued', () => pm.expect(res.queued).to.eql(3));",
+                  "pm.test('jobIds array returned', () => {",
+                  "  pm.expect(res.jobIds).to.be.an('array').with.length(3);",
+                  "});",
+                  "",
+                  "if (res.jobIds) {",
+                  "  pm.collectionVariables.set('lastJobIds', JSON.stringify(res.jobIds));",
+                  "  console.log('3 personalized messages queued successfully.');",
+                  "  console.log('923001234567 will receive: \"Hello Ahmed! Order ORD-101 dispatched. Amount: Rs. 5,500\"');",
+                  "  console.log('923009876543 will receive: \"Hello Sara! Order ORD-102 dispatched. Amount: Rs. 3,200\"');",
+                  "  console.log('923331234567 will receive: \"Hello Ali! Order ORD-103 dispatched. Amount: Rs. 8,900\"');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"message\": \"Hello {{name}}! Your order {{orderId}} has been dispatched. Amount: Rs. {{amount}}\",\n  \"recipients\": [\n    {\n      \"phone\": \"923001234567\",\n      \"variables\": {\n        \"name\": \"Ahmed\",\n        \"orderId\": \"ORD-101\",\n        \"amount\": \"5,500\"\n      }\n    },\n    {\n      \"phone\": \"923009876543\",\n      \"variables\": {\n        \"name\": \"Sara\",\n        \"orderId\": \"ORD-102\",\n        \"amount\": \"3,200\"\n      }\n    },\n    {\n      \"phone\": \"923331234567\",\n      \"variables\": {\n        \"name\": \"Ali\",\n        \"orderId\": \"ORD-103\",\n        \"amount\": \"8,900\"\n      }\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            },
+            "description": "Each recipient receives a **unique personalized message**.\n\n`{{name}}`, `{{orderId}}`, `{{amount}}` placeholders are replaced in the worker before sending.\n\n**Each number receives a different message:**\n- 923001234567 → `Hello Ahmed! Your order ORD-101 has been dispatched. Amount: Rs. 5,500`\n- 923009876543 → `Hello Sara! Your order ORD-102 has been dispatched. Amount: Rs. 3,200`\n- 923331234567 → `Hello Ali! Your order ORD-103 has been dispatched. Amount: Rs. 8,900`\n\nIf a variable key is missing from the map, the placeholder is left as-is (e.g. `{{city}}` stays `{{city}}`) so the message is never silently corrupted."
+          },
+          "response": [
+            {
+              "name": "3 personalized messages queued",
+              "status": "Accepted",
+              "code": 202,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"queued\": 3,\n  \"jobIds\": [\n    \"msg-clx1a2b3c\",\n    \"msg-clx1a2b3d\",\n    \"msg-clx1a2b3e\"\n  ],\n  \"message\": \"3 message(s) queued for delivery\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Send Single Message",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 202 Accepted', () => pm.response.to.have.status(202));",
+                  "const res = pm.response.json();",
+                  "pm.test('queued count is 1', () => pm.expect(res.queued).to.eql(1));",
+                  "pm.test('one jobId returned', () => pm.expect(res.jobIds).to.have.length(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"message\": \"Test message from WhatsApp Gateway.\",\n  \"recipients\": [\n    { \"phone\": \"923001234567\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            },
+            "description": "Send to a single recipient. Useful for verifying the connection is working before sending to a large list."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Error Cases",
+      "description": "Validation and error scenario tests.",
+      "item": [
+        {
+          "name": "Connect — Missing tenantId (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const res = pm.response.json();",
+                  "pm.test('error is Bad Request', () => pm.expect(res.error).to.eql('Bad Request'));",
+                  "pm.test('message array mentions tenantId', () => {",
+                  "  pm.expect(res.message).to.be.an('array');",
+                  "  pm.expect(res.message.some(m => m.includes('tenantId'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/connect",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "connect"]
+            }
+          },
+          "response": [
+            {
+              "name": "Validation error",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"statusCode\": 400,\n  \"message\": [\"tenantId should not be empty\", \"tenantId must be a string\"],\n  \"error\": \"Bad Request\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Send — Empty recipients array (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "const res = pm.response.json();",
+                  "pm.test('message mentions recipients', () => {",
+                  "  const msgs = Array.isArray(res.message) ? res.message : [res.message];",
+                  "  pm.expect(msgs.some(m => m.toLowerCase().includes('recipients'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"message\": \"Test\",\n  \"recipients\": []\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            }
+          },
+          "response": [
+            {
+              "name": "Empty recipients",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"statusCode\": 400,\n  \"message\": [\"recipients must contain at least 1 elements\"],\n  \"error\": \"Bad Request\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Send — Unknown fields rejected (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400 — whitelist validation', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"{{tenantId}}\",\n  \"message\": \"Test\",\n  \"recipients\": [{ \"phone\": \"923001234567\" }],\n  \"unknownField\": \"should be rejected\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            },
+            "description": "NestJS `ValidationPipe` is configured with `forbidNonWhitelisted: true` — any unknown property causes a 400."
+          },
+          "response": []
+        },
+        {
+          "name": "Send — Non-existent tenant (500)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 500', () => pm.response.to.have.status(500));",
+                  "const res = pm.response.json();",
+                  "pm.test('error message mentions session', () => {",
+                  "  pm.expect(res.message).to.include('session');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantId\": \"non-existent-tenant\",\n  \"message\": \"This should fail\",\n  \"recipients\": [{ \"phone\": \"923001234567\" }]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/messages/send",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages", "send"]
+            }
+          },
+          "response": [
+            {
+              "name": "No session found",
+              "status": "Internal Server Error",
+              "code": 500,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"statusCode\": 500,\n  \"message\": \"No session found for tenant non-existent-tenant. Call /auth/connect first.\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

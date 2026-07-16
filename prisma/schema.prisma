@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model WhatsAppSession {
+  id          String        @id @default(cuid())
+  tenantId    String        @unique
+  phoneNumber String?
+  status      SessionStatus @default(DISCONNECTED)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  authState AuthState?
+  messages  MessageLog[]
+
+  @@map("whatsapp_sessions")
+}
+
+model AuthState {
+  id        String   @id @default(cuid())
+  sessionId String   @unique
+  creds     Json
+  keys      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session WhatsAppSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("auth_states")
+}
+
+model MessageLog {
+  id        String        @id @default(cuid())
+  sessionId String
+  to        String
+  message   String        @db.Text
+  status    MessageStatus @default(QUEUED)
+  jobId     String?
+  error     String?       @db.Text
+  sentAt    DateTime?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  session WhatsAppSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@index([status])
+  @@map("message_logs")
+}
+
+enum SessionStatus {
+  CONNECTING
+  CONNECTED
+  DISCONNECTED
+  QR_PENDING
+}
+
+enum MessageStatus {
+  QUEUED
+  PROCESSING
+  SENT
+  FAILED
+}

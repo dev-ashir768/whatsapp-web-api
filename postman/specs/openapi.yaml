@@ -1,0 +1,366 @@
+openapi: 3.0.3
+
+info:
+  title: WhatsApp Gateway API
+  description: |
+    Scalable multi-tenant WhatsApp Gateway for 3PL/OMS systems.
+
+    ## Overview
+    - **Multi-tenancy**: Each tenant gets an isolated WhatsApp socket connection identified by `tenantId`.
+    - **Session persistence**: Auth state (QR creds + signal keys) is stored in MySQL via Prisma, so sessions survive server restarts.
+    - **Bulk messaging**: Messages are queued via BullMQ with random anti-spam delays (2–6s) and automatic retry (3 attempts, exponential back-off).
+
+    ## Workflow
+    1. `POST /auth/connect` — initiate connection, scan returned QR code in WhatsApp mobile.
+    2. Poll `POST /auth/status` until `status: connected`.
+    3. `POST /messages/send` — send bulk messages; returns immediately once jobs are queued.
+
+  version: 1.0.0
+  contact:
+    email: info.ashirarif@gmail.com
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+
+# No authentication enforced yet. All endpoints are open on localhost.
+# When deploying to production, add an API key guard and replace [] with [ApiKey].
+security: []
+
+tags:
+  - name: Auth
+    description: WhatsApp session management — connect, QR code, reconnect
+  - name: Messages
+    description: Bulk message dispatch via BullMQ
+
+paths:
+
+  /auth/connect:
+    post:
+      tags: [Auth]
+      summary: Initiate WhatsApp connection
+      description: |
+        Starts a WhatsApp socket connection for the given tenant.
+
+        **Behaviour:**
+        - If no prior session exists: creates one, returns a base64 QR code (`data:image/png;base64,...`).
+        - If session exists and is connected: returns `status: connected` with no QR code.
+        - If session exists but is disconnected: attempts reconnection and returns a new QR code.
+
+        The QR code should be rendered as an `<img>` tag or decoded with a QR reader. Once scanned,
+        the socket transitions to `connected` and auth state is persisted to MySQL automatically.
+      operationId: authConnect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectRequest'
+            examples:
+              new_tenant:
+                summary: New tenant — will return QR code
+                value:
+                  tenantId: "tenant-001"
+              existing_tenant:
+                summary: Existing connected tenant
+                value:
+                  tenantId: "tenant-acme"
+      responses:
+        '200':
+          description: Connection initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectResponse'
+              examples:
+                qr_pending:
+                  summary: QR code returned (scan required)
+                  value:
+                    tenantId: "tenant-001"
+                    status: "qr_pending"
+                    qrCode: "data:image/png;base64,iVBORw0KGgo..."
+                    message: "Scan the QR code with WhatsApp"
+                already_connected:
+                  summary: Session already active
+                  value:
+                    tenantId: "tenant-001"
+                    status: "connected"
+                    qrCode: null
+                    message: "Session already active"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/status:
+    post:
+      tags: [Auth]
+      summary: Check session status
+      description: |
+        Returns the current connection status for a tenant's WhatsApp socket.
+
+        | Status | Meaning |
+        |---|---|
+        | `connecting` | Socket is initialising |
+        | `qr_pending` | Waiting for QR scan |
+        | `connected` | Active and ready to send |
+        | `disconnected` | Socket closed; auto-reconnect pending |
+        | `not_initialized` | No connection attempt has been made |
+      operationId: authStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectRequest'
+            example:
+              tenantId: "tenant-001"
+      responses:
+        '200':
+          description: Status returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              examples:
+                connected:
+                  value:
+                    tenantId: "tenant-001"
+                    status: "connected"
+                qr_pending:
+                  value:
+                    tenantId: "tenant-001"
+                    status: "qr_pending"
+                not_initialized:
+                  value:
+                    tenantId: "tenant-001"
+                    status: "not_initialized"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /messages/send:
+    post:
+      tags: [Messages]
+      summary: Send bulk WhatsApp messages
+      description: |
+        Validates the payload and pushes one BullMQ job per recipient. Returns `202 Accepted`
+        immediately — delivery happens asynchronously.
+
+        **Anti-spam behaviour:**
+        - Worker concurrency is `1` (jobs process serially).
+        - A random delay of `MSG_DELAY_MIN`–`MSG_DELAY_MAX` ms (default 2000–6000ms) is applied before each send.
+        - Jobs retry up to 3 times with exponential back-off on failure.
+
+        **Phone number format:** international digits without `+` or spaces, e.g. `923001234567`.
+      operationId: messagesSend
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              single_recipient:
+                summary: Single recipient
+                value:
+                  tenantId: "tenant-001"
+                  message: "Your order #ORD-9821 has been dispatched."
+                  recipients:
+                    - phone: "923001234567"
+              bulk:
+                summary: Bulk to multiple recipients
+                value:
+                  tenantId: "tenant-001"
+                  message: "Shipment update: your parcel is out for delivery."
+                  recipients:
+                    - phone: "923001234567"
+                    - phone: "923009876543"
+                    - phone: "923331234567"
+              with_variables:
+                summary: Per-recipient variable substitution
+                value:
+                  tenantId: "tenant-001"
+                  message: "Hi {{name}}, your order {{orderId}} is ready."
+                  recipients:
+                    - phone: "923001234567"
+                      variables:
+                        name: "Ahmed"
+                        orderId: "ORD-001"
+                    - phone: "923009876543"
+                      variables:
+                        name: "Sara"
+                        orderId: "ORD-002"
+      responses:
+        '202':
+          description: Messages accepted and queued for delivery
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+              example:
+                success: true
+                queued: 3
+                jobIds:
+                  - "msg-clx1a2b3c"
+                  - "msg-clx1a2b3d"
+                  - "msg-clx1a2b3e"
+                message: "3 message(s) queued for delivery"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+
+  schemas:
+
+    ConnectRequest:
+      type: object
+      required: [tenantId]
+      properties:
+        tenantId:
+          type: string
+          description: Unique identifier for the tenant/WhatsApp account (max 64 chars)
+          maxLength: 64
+          example: "tenant-001"
+
+    ConnectResponse:
+      type: object
+      properties:
+        tenantId:
+          type: string
+          example: "tenant-001"
+        status:
+          type: string
+          enum: [qr_pending, connected, connecting, disconnected]
+          example: "qr_pending"
+        qrCode:
+          type: string
+          nullable: true
+          description: Base64 PNG data URL of the QR code. Null when already connected.
+          example: "data:image/png;base64,iVBORw0KGgo..."
+        message:
+          type: string
+          example: "Scan the QR code with WhatsApp"
+
+    StatusResponse:
+      type: object
+      properties:
+        tenantId:
+          type: string
+          example: "tenant-001"
+        status:
+          type: string
+          enum: [connecting, qr_pending, connected, disconnected, not_initialized]
+          example: "connected"
+
+    MessageRecipient:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          description: International phone number without + or spaces
+          pattern: '^\d{7,15}$'
+          example: "923001234567"
+        variables:
+          type: object
+          description: Optional key-value pairs for per-recipient message templating
+          additionalProperties:
+            type: string
+          example:
+            name: "Ahmed"
+            orderId: "ORD-9821"
+
+    SendMessageRequest:
+      type: object
+      required: [tenantId, message, recipients]
+      properties:
+        tenantId:
+          type: string
+          maxLength: 64
+          example: "tenant-001"
+        message:
+          type: string
+          description: Message text (supports {{variable}} placeholders)
+          maxLength: 4096
+          example: "Your order #ORD-9821 has been dispatched."
+        recipients:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/MessageRecipient'
+
+    SendMessageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        queued:
+          type: integer
+          description: Number of jobs pushed to BullMQ
+          example: 3
+        jobIds:
+          type: array
+          description: BullMQ job IDs for tracking
+          items:
+            type: string
+          example: ["msg-clx1a2b3c", "msg-clx1a2b3d", "msg-clx1a2b3e"]
+        message:
+          type: string
+          example: "3 message(s) queued for delivery"
+
+    ErrorResponse:
+      type: object
+      properties:
+        statusCode:
+          type: integer
+          example: 400
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          example: ["tenantId should not be empty"]
+        error:
+          type: string
+          example: "Bad Request"
+
+  responses:
+
+    ValidationError:
+      description: Request body failed validation (class-validator)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 400
+            message:
+              - "tenantId should not be empty"
+              - "recipients must contain at least 1 elements"
+            error: "Bad Request"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 500
+            message: "No session found for tenant xyz. Call /auth/connect first."
+            error: "Internal Server Error"
+
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Not enforced in development. Add a NestJS guard in production that validates
+        this header against a per-tenant API key stored in the database.
