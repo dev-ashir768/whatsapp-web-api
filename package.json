@@ -6,12 +6,11 @@
     "build": "nest build",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "prisma:generate": "dotenv -e .env -- prisma generate",
     "prisma:migrate": "dotenv -e .env -- prisma migrate dev",
     "prisma:studio": "dotenv -e .env -- prisma studio",
-    "prisma:reset": "dotenv -e .env -- prisma migrate reset",
-    "db:reset": "dotenv -e .env -- ts-node scripts/db-reset.ts"
+    "prisma:reset": "dotenv -e .env -- prisma migrate reset"
   },
   "dependencies": {
     "@nestjs/bullmq": "^10.0.0",
