@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { ApiKeyGuard } from './common/api-key.guard';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -23,6 +24,7 @@ async function bootstrap() {
   );
 
   app.setGlobalPrefix('api/v1');
+  app.useGlobalGuards(new ApiKeyGuard());
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port, '0.0.0.0');
